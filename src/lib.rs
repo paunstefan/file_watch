@@ -1,3 +1,5 @@
+use std::{ffi::CString, os::unix::prelude::OsStrExt};
+
 use bitflags::bitflags;
 use libc::c_int;
 
@@ -48,9 +50,34 @@ impl Watcher {
     /// A watch consists of a file and a series of events
     /// to watch for. When any of the events happen, the
     /// watcher will be notified.
-    pub fn add_watch(file_path: std::path::PathBuf, events: Events) -> Result<(), Error> {
+    pub fn add_watch(&self, file_path: std::path::PathBuf, events: Events) -> Result<i32, Error> {
+        let path_pointer = CString::new(file_path.as_os_str().as_bytes())
+            .map_err(|_x| Error::Other)?
+            .as_ptr();
+        let wd = unsafe { libc::inotify_add_watch(self.fd, path_pointer, events.bits()) };
+
+        if wd < 0 {
+            let errno = get_errno().expect("Can't get errno value.");
+
+            todo!()
+        }
+
         todo!()
     }
+}
+
+pub fn get_errno() -> Option<i32> {
+    let errno_addr = unsafe { libc::__errno_location() };
+    dbg!(errno_addr);
+
+    if errno_addr.is_null() {
+        return None;
+    }
+
+    let errno = unsafe { *errno_addr };
+    dbg!(errno);
+
+    Some(errno)
 }
 
 #[cfg(test)]
