@@ -1,4 +1,10 @@
-use std::{ffi::CString, os::unix::prelude::OsStrExt};
+use std::{
+    collections::HashMap,
+    ffi::CString,
+    fs::File,
+    io::Read,
+    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt},
+};
 
 use bitflags::bitflags;
 use libc::c_int;
@@ -23,7 +29,8 @@ bitflags! {
 
 #[derive(Debug)]
 pub struct Watcher {
-    fd: c_int,
+    fd: File,
+    watches: HashMap<std::path::PathBuf, c_int>,
 }
 
 impl Watcher {
@@ -42,7 +49,10 @@ impl Watcher {
             return Err(Error::InotifyInit);
         }
 
-        Ok(Watcher { fd })
+        Ok(Watcher {
+            fd: unsafe { File::from_raw_fd(fd) },
+            watches: HashMap::new(),
+        })
     }
 
     /// Add watch to a file or directory
@@ -50,32 +60,57 @@ impl Watcher {
     /// A watch consists of a file and a series of events
     /// to watch for. When any of the events happen, the
     /// watcher will be notified.
-    pub fn add_watch(&self, file_path: std::path::PathBuf, events: Events) -> Result<i32, Error> {
-        let path_pointer = CString::new(file_path.as_os_str().as_bytes())
-            .map_err(|_x| Error::Other)?
-            .as_ptr();
-        let wd = unsafe { libc::inotify_add_watch(self.fd, path_pointer, events.bits()) };
+    pub fn add_watch(
+        &mut self,
+        file_path: std::path::PathBuf,
+        events: Events,
+    ) -> Result<i32, Error> {
+        let cstring = CString::new(file_path.as_os_str().as_bytes()).map_err(|_x| Error::Other)?;
+        //println!("{:?};", cstring);
+        let path_pointer = cstring.as_ptr();
+        unsafe {
+            libc::printf(path_pointer);
+        }
+
+        let wd =
+            unsafe { libc::inotify_add_watch(self.fd.as_raw_fd(), path_pointer, events.bits()) };
 
         if wd < 0 {
             let errno = get_errno().expect("Can't get errno value.");
-
+            dbg!(errno);
             todo!()
         }
 
-        todo!()
+        self.watches.insert(file_path, wd);
+
+        Ok(wd)
+    }
+
+    pub fn wait_for_event(&mut self) {
+        let mut buffer = [0; std::mem::size_of::<libc::inotify_event>()];
+
+        let read_count = self.fd.read(&mut buffer).unwrap();
+        dbg!(read_count);
+
+        if read_count == std::mem::size_of::<libc::inotify_event>() {
+            let event: libc::inotify_event = unsafe { std::mem::transmute(buffer) };
+            dbg!(event.wd);
+            dbg!(event.mask);
+            dbg!(event.len);
+        }
     }
 }
 
-pub fn get_errno() -> Option<i32> {
+// TODO: Drop for Watcher to close fd ?
+
+fn get_errno() -> Option<i32> {
     let errno_addr = unsafe { libc::__errno_location() };
-    dbg!(errno_addr);
 
     if errno_addr.is_null() {
         return None;
     }
 
     let errno = unsafe { *errno_addr };
-    dbg!(errno);
 
     Some(errno)
 }
