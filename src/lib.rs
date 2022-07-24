@@ -23,6 +23,14 @@
 //! watcher.remove_watch(wd.unwrap());
 //! ```
 //!
+//! There is also a `tokio` feature that is optional. This adds a `wait_for_event_async`
+//! method if you need to not block during the wait.
+//!
+//! The usage is almost identical, just replace the `wait_for_event` line with the async version.
+//!
+//! ```rust,ignore,no_run
+//! let event = watcher.wait_for_event_async().await.unwrap();
+//! ```
 #![deny(
     missing_docs,
     trivial_casts,

@@ -87,8 +87,13 @@ impl Event {
 #[derive(Debug)]
 pub struct Watcher {
     fd: File,
+    #[cfg(feature = "tokio")]
+    async_fd: tokio::fs::File,
     watches: HashMap<c_int, PathBuf>,
 }
+
+const MAX_FILE_LEN: usize = 255;
+const EVENT_LEN: usize = std::mem::size_of::<libc::inotify_event>() + MAX_FILE_LEN + 1;
 
 impl Watcher {
     /// Create a new Watcher instance
@@ -105,8 +110,15 @@ impl Watcher {
             return Err(Error::InotifyInit);
         }
 
+        let fd = unsafe { File::from_raw_fd(fd) };
+
+        #[cfg(feature = "tokio")]
+        let async_fd = tokio::fs::File::from_std(fd.try_clone().unwrap());
+
         Ok(Watcher {
-            fd: unsafe { File::from_raw_fd(fd) },
+            fd,
+            #[cfg(feature = "tokio")]
+            async_fd,
             watches: HashMap::new(),
         })
     }
@@ -137,7 +149,7 @@ impl Watcher {
 
     /// Blocks until an event is received for a configured watch
     pub fn wait_for_event(&mut self) -> Result<Event, Error> {
-        let mut buffer = [0; std::mem::size_of::<libc::inotify_event>() + 255 + 1];
+        let mut buffer = vec![0; EVENT_LEN];
 
         let read_count = self.fd.read(&mut buffer).map_err(Error::IOError)?;
 
@@ -145,45 +157,26 @@ impl Watcher {
             return Err(Error::WaitEvent);
         }
 
-        let mut rdr = Cursor::new(buffer);
+        parse_event(buffer, self)
+    }
 
-        let event = {
-            let wd = rdr.read_i32::<NativeEndian>().unwrap();
-            let mask = rdr.read_u32::<NativeEndian>().unwrap();
-            let cookie = rdr.read_u32::<NativeEndian>().unwrap();
-            let len = rdr.read_u32::<NativeEndian>().unwrap();
-            libc::inotify_event {
-                wd,
-                mask,
-                cookie,
-                len,
-            }
-        };
+    #[cfg(feature = "tokio")]
+    /// Nonblocking wait for the events
+    pub async fn wait_for_event_async(&mut self) -> Result<Event, Error> {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = vec![0; EVENT_LEN];
 
-        let name = if event.len > 0 {
-            let mut name = vec![0; event.len as usize];
-            rdr.read_exact(&mut name).map_err(Error::IOError)?;
-            let name: String = name
-                .iter()
-                .take_while(|b| **b != 0)
-                .map(|b| *b as char)
-                .collect();
-            Some(name)
-        } else {
-            None
-        };
+        let read_count = self
+            .async_fd
+            .read(&mut buffer)
+            .await
+            .map_err(Error::IOError)?;
 
-        // Safety: all bits fit into the 32bit number. Unchecked is needed because
-        // some flags that can't be set by the user can be returned by the API
-        let flags = unsafe { EventTypes::from_bits_unchecked(event.mask) };
-
-        let my_event = Event::new(self.watches.get(&event.wd).unwrap().clone(), flags, name);
-
-        if my_event.removed {
-            self.watches.remove(&event.wd);
+        if read_count < std::mem::size_of::<libc::inotify_event>() {
+            return Err(Error::WaitEvent);
         }
-
-        Ok(my_event)
+        dbg!(read_count);
+        parse_event(buffer, self)
     }
 
     /// Remove watch from a file
@@ -202,4 +195,46 @@ impl Watcher {
 
         Ok(())
     }
+}
+
+fn parse_event(buffer: Vec<u8>, watcher: &mut Watcher) -> Result<Event, Error> {
+    let mut rdr = Cursor::new(buffer);
+
+    let event = {
+        let wd = rdr.read_i32::<NativeEndian>().unwrap();
+        let mask = rdr.read_u32::<NativeEndian>().unwrap();
+        let cookie = rdr.read_u32::<NativeEndian>().unwrap();
+        let len = rdr.read_u32::<NativeEndian>().unwrap();
+        libc::inotify_event {
+            wd,
+            mask,
+            cookie,
+            len,
+        }
+    };
+
+    let name = if event.len > 0 {
+        let mut name = vec![0; event.len as usize];
+        rdr.read_exact(&mut name).map_err(Error::IOError)?;
+        let name: String = name
+            .iter()
+            .take_while(|b| **b != 0)
+            .map(|b| *b as char)
+            .collect();
+        Some(name)
+    } else {
+        None
+    };
+
+    // Safety: all bits fit into the 32bit number. Unchecked is needed because
+    // some flags that can't be set by the user can be returned by the API
+    let flags = unsafe { EventTypes::from_bits_unchecked(event.mask) };
+
+    let my_event = Event::new(watcher.watches.get(&event.wd).unwrap().clone(), flags, name);
+
+    if my_event.removed {
+        watcher.watches.remove(&event.wd);
+    }
+
+    Ok(my_event)
 }
